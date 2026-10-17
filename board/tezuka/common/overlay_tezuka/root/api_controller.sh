@@ -314,19 +314,25 @@ read_file_v () {
   fi
 }
 
-# fwenv_get: U-Boot environment value in $FWV, cached; fw_printenv reads the QSPI flash, so refresh at most
-# every FWENV_MAX dump cycles per variable.
-declare -A FWENV FWENV_AGE
-FWENV_MAX=15
+# fwenv_get: U-Boot environment value in $FWV, cached. fw_printenv reads the whole environment from the QSPI flash, so the
+# environment is loaded once for all variables (a single fw_printenv, one flash read) and reloaded at most every FWENV_MAX
+# poll cycles (LOOP_N counts poll cycles). Reading each variable with its own fw_printenv made seven forks and seven flash
+# reads in the same cycle every 30 seconds.
+declare -A FWENV
+FWENV_MAX=15; FWENV_AT=""
+fwenv_load () {
+  local _l
+  FWENV=()
+  while IFS= read -r _l; do
+    [[ $_l == *=* ]] && FWENV[${_l%%=*}]=${_l#*=}
+  done < <(fw_printenv 2>/dev/null)
+}
 fwenv_get () {
-  local _n="$1"
-  if [ "${FWENV_AGE[$_n]:-$FWENV_MAX}" -ge "$FWENV_MAX" ]; then
-    FWENV[$_n]=$(fw_printenv -n "$_n" 2>/dev/null)
-    FWENV_AGE[$_n]=0
-  else
-    FWENV_AGE[$_n]=$(( FWENV_AGE[$_n] + 1 ))
+  if [ -z "$FWENV_AT" ] || [ $(( LOOP_N - FWENV_AT )) -ge "$FWENV_MAX" ]; then
+    fwenv_load
+    FWENV_AT=$LOOP_N
   fi
-  FWV=${FWENV[$_n]}
+  FWV=${FWENV[$1]}
 }
 
 # reg_rd / reg_wr: IIO direct register access through debugfs (what iio_attr -D does), without starting
