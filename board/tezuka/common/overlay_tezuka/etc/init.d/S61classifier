@@ -1,14 +1,12 @@
 #!/bin/sh
 #
-# Starts the onboard PSD spectral-shape signal classifier. Numbered after
+# Starts the onboard emitter detector / signal classifier. Numbered after
 # S60maia-httpd since it depends on maia-httpd already
 # serving /waterfall — see app/classifier/classifier.c for what it does.
 
 NAME=classifier
 DAEMON=/usr/bin/$NAME
 PIDFILE=/var/run/$NAME.pid
-TEMPLATES="/mnt/jffs2/classifier/templates.bin"
-SEED="/etc/classifier-default-templates.bin"
 
 [ -x "$DAEMON" ] || exit 0
 
@@ -21,17 +19,9 @@ start() {
 		echo "disabled"
 		return 0
 	fi
-	# Seed a small starter set on first boot (FM broadcast, DAB+, CW/
-	# beacon — synthesized canonical shapes, see tools/classifier_templates/
-	# synthesize_template.py) so the classifier reports something other
-	# than "unknown" out of the box, same S59bandplan-style seed-if-
-	# missing pattern. A later cmd/classifier/templates push overwrites
-	# this permanently, same as S51wireguard/S59bandplan's persistence.
-	if [ ! -f "$TEMPLATES" ] && [ -f "$SEED" ]; then
-		install -D -m 644 "$SEED" "$TEMPLATES"
-	fi
-	start-stop-daemon -S -q -b -m -p "$PIDFILE" --exec "$DAEMON" -- \
-		-f "$TEMPLATES" && echo "OK"
+	# No templates: the detector measures what is on the air. Options are
+	# in app/classifier/README.md (-c confidence floor, -i interval).
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" --exec "$DAEMON" && echo "OK"
 }
 
 stop() {
