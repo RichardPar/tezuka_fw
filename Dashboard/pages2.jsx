@@ -2545,7 +2545,7 @@ function Performance({ d }) {
   return (
     <div className="page">
       <div className="grid-12">
-        <Card title="CPU" sub="ARM Cortex-A9 · Zynq-7020 processing system" className="span-6">
+        <Card title="CPU" sub={`ARM Cortex-A9 · ${hwParts(d.hwModel).soc} processing system`} className="span-6">
           <Field label="Overclock profile" hint="/boot/overclock · takes effect on next boot">
             <Select
               value={d.overclock || ''}

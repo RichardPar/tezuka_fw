@@ -50,7 +50,7 @@ const DEFAULTS = {
 // field kinds: ro | num | slider | select
 const META = {
   overview: { desc: "Agile RF transceiver — wideband 2×2 MIMO front-end paired with the Zynq programmable logic.", fields: [
-    { kind: "ro", label: "Part", get: () => "AD9361" }, { kind: "ro", label: "Configuration", get: () => "2×2 MIMO" },
+    { kind: "ro", label: "Part", get: (d) => hwParts(d.hwModel).rf }, { kind: "ro", label: "Configuration", get: () => "2×2 MIMO" },
     { kind: "ro", label: "Tuning range", get: () => "70 MHz – 6 GHz" }, { kind: "ro", label: "Max channel BW", get: () => "56 MHz" }] },
   rxport: { desc: "Differential RF receive ports. Two independent inputs can be active simultaneously.", fields: [
     { kind: "select", key: "rxInput", label: "Active input", options: ["RX1", "RX2", "RX1 + RX2"] },
@@ -108,8 +108,8 @@ const META = {
   ddi: { desc: "Digital data interface carrying I/Q samples to and from the FPGA.", fields: [
     { kind: "select", key: "ddiIf", label: "Interface", options: ["LVDS", "CMOS"] },
     { kind: "ro", label: "RX data rate", get: (d) => `${d.rxRate.toFixed(2)} Mb/s` }, { kind: "ro", label: "Bus", get: () => "12-bit I/Q" }] },
-  fpga: { desc: "Zynq-7020 programmable logic running the Tezuka HDL core and AXI DMA.", fields: [
-    { kind: "ro", label: "Device", get: () => "XC7Z020" }, { kind: "ro", label: "Core", get: () => "Tezuka HDL" }, { kind: "ro", label: "PL clock", get: () => "100 MHz" }] },
+  fpga: { desc: "Zynq programmable logic running the Tezuka HDL core and AXI DMA.", fields: [
+    { kind: "ro", label: "Device", get: (d) => hwParts(d.hwModel).fpga }, { kind: "ro", label: "Core", get: () => "Tezuka HDL" }, { kind: "ro", label: "PL clock", get: () => "100 MHz" }] },
 };
 
 function ArchBlock({ id, sel, onClick }) {
@@ -168,11 +168,11 @@ function Architecture({ d }) {
   const m = META[sel];
   const g = sel === "overview" ? "overview" : BLK[sel][4];
   const editable = m.fields.some((f) => f.kind !== "ro");
-  const title = sel === "overview" ? "AD9361 transceiver" : BLK[sel][5] + (BLK[sel][6] ? " " + BLK[sel][6] : "");
+  const title = sel === "overview" ? `${hwParts(d.hwModel).rf} transceiver` : BLK[sel][5] + (BLK[sel][6] ? " " + BLK[sel][6] : "");
   return (
     <div className="page">
       <div className="grid-12">
-        <Card title="AD9361 RF transceiver" sub="Functional block diagram · click a block to edit" className="span-8">
+        <Card title={`${hwParts(d.hwModel).rf} RF transceiver`} sub="Functional block diagram · click a block to edit" className="span-8">
           <svg viewBox="0 0 848 500" className="arch-svg">
             <defs>
               <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -180,8 +180,8 @@ function Architecture({ d }) {
               </marker>
             </defs>
             <rect x="110" y="64" width="580" height="408" rx="14" className="chip" />
-            <text x="120" y="56" className="chip-label">AD9361 · 2×2 MIMO</text>
-            <text x="769" y="180" className="chip-label" textAnchor="middle">Zynq-7020</text>
+            <text x="120" y="56" className="chip-label">{hwParts(d.hwModel).rf} · 2×2 MIMO</text>
+            <text x="769" y="180" className="chip-label" textAnchor="middle">{hwParts(d.hwModel).soc}</text>
             {CONN.map(([cls, dpath], i) => (
               <path key={i} d={dpath} className={`conn ${cls}`} markerEnd="url(#arr)" markerStart={cls === "data" ? "url(#arr)" : undefined} />
             ))}

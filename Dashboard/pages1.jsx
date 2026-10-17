@@ -183,7 +183,7 @@ function Dashboard({ d, ver }) {
         <Card title="Temperature" sub="On-die sensors · live" className="span-12">
           <div className="gauge-row">
             <DialGauge value={d.fpgaTemp} max={65} label="FPGA" unit="°C" color="var(--ok)" />
-            <DialGauge value={d.temp} max={65} label="AD9361" unit="°C" color="var(--ok)" />
+            <DialGauge value={d.temp} max={65} label={hwParts(d.hwModel).rf} unit="°C" color="var(--ok)" />
           </div>
         </Card>
 

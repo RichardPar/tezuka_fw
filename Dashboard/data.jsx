@@ -375,4 +375,13 @@ function Checkbox({ checked, onChange, label }) {
   );
 }
 
-Object.assign(window, { useLiveData, fmtUptime, Card, Pill, Toggle, Slider, Field, Select, TextInput, TextArea, Checkbox });
+// Part names taken from the board model string the radio reports (state/main/hw_model), e.g. "FISHBall-PlutoSky (Z7010-AD9361)".
+// Without a recognisable model the Dashboard keeps showing the Zynq-7020 / AD9361 names it always had.
+function hwParts(model) {
+  const m = /Z(70\d\d)[-\/ ]?(AD936\d)/i.exec(model || '');
+  return m
+    ? { soc: 'Zynq-' + m[1], fpga: 'XC7Z' + m[1].slice(1), rf: m[2].toUpperCase() }
+    : { soc: 'Zynq-7020', fpga: 'XC7Z020', rf: 'AD9361' };
+}
+
+Object.assign(window, { hwParts, useLiveData, fmtUptime, Card, Pill, Toggle, Slider, Field, Select, TextInput, TextArea, Checkbox });
