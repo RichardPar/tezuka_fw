@@ -44,6 +44,22 @@ awk -v hz=$HZ -v win=$WIN 'FNR == NR { a[$1 " " $2] = $4; next } { d = $4 - a[$1
 echo; echo "== busiest interrupts (per second, summed over cpus)"
 awk -v win=$WIN 'FNR == NR { a[$2 " " $3 " " $4] = $1; next } { k = $2 " " $3 " " $4; d = $1 - a[k]; if (d > 0) printf "%8.1f  %s\n", d / win, k }' "$T/a.irq" "$T/b.irq" | sort -rn | head -8
 
+echo; echo "== MQTT clients on the broker ports 1883, 9001, 9002 (loopback = local services; anything else keeps the status poll running)"
+dec() { printf '%d' "0x$1"; }
+for f in /proc/net/tcp /proc/net/tcp6; do [ -r "$f" ] || continue
+  while read -r sl la ra st rest; do
+    [ "$st" = 01 ] || continue
+    case ${la##*:} in 075B) lp=1883;; 2329) lp=9001;; 232A) lp=9002;; *) continue;; esac
+    h=${ra%%:*}
+    case $h in
+      0100007F|00000000000000000000000001000000|0000000000000000FFFF00000100007F) who=loopback;;
+      *) h4=$(echo "$h" | cut -c$((${#h}-7))-); who="$(dec $(echo $h4 | cut -c7-8)).$(dec $(echo $h4 | cut -c5-6)).$(dec $(echo $h4 | cut -c3-4)).$(dec $(echo $h4 | cut -c1-2))  REMOTE";;
+    esac
+    echo "  port $lp  from $who"
+  done < "$f"
+done
+echo
+
 echo; echo "== snapshot (BusyBox top, one iteration)"
 top -bn1 2>/dev/null | head -16
 echo; echo "== memory"; grep -E 'MemTotal|MemFree|MemAvailable|Buffers|^Cached|SwapTotal' /proc/meminfo
