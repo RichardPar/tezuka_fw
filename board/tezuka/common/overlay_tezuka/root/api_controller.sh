@@ -1350,14 +1350,54 @@ GPS_TICK=0
   done
 ) &
 
+# Remote MQTT clients (the Dashboard in a browser, Home Assistant, ...): established TCP connections to the broker's ports
+# (1883 plain, 9001 websocket, 9002 secure websocket) from an address that is not loopback. Local services reach the broker
+# over loopback and do not count. Sets REMOTE_CLIENTS. Pure shell builtins, no forks. PROC_NET_TCP and PROC_NET_TCP6 can be
+# overridden for testing.
+mqtt_remote_clients () {
+  local _f _sl _la _ra _st _rest
+  REMOTE_CLIENTS=0
+  for _f in "${PROC_NET_TCP:-/proc/net/tcp}" "${PROC_NET_TCP6:-/proc/net/tcp6}"; do
+    [ -r "$_f" ] || continue
+    while read -r _sl _la _ra _st _rest; do
+      [[ $_st == 01 ]] || continue                                   # ESTABLISHED
+      case ${_la##*:} in 075B|2329|232A) ;; *) continue ;; esac     # 1883, 9001, 9002
+      case ${_ra%%:*} in
+        0100007F|00000000000000000000000001000000|0000000000000000FFFF00000100007F) ;;   # 127.0.0.1, ::1, ::ffff:127.0.0.1
+        *) REMOTE_CLIENTS=$(( REMOTE_CLIENTS + 1 )) ;;
+      esac
+    done < "$_f"
+  done
+}
+
 # Poll dynamic data every 2 seconds. DUMPING / FORCE_REFRESH / LOOP_N are read by publish() and dump_data();
 # the command-handler subshell above was forked before they exist, so it keeps the original behaviour.
+# Polling reads dozens of AD9361 attributes over SPI and publishes them, which is pointless when nobody is listening, so
+# with no remote MQTT client and no serial consumer the poll runs only once every IDLE_REFRESH cycles (about a minute) to
+# keep the retained values and the sweep bookkeeping in dump_data from going stale. A client that connects gets a full
+# refresh at the next cycle (within about 2 seconds). Create /tmp/always_poll to turn this off.
+IDLE_REFRESH=30
 DUMPING=0; FORCE_REFRESH=1; LOOP_N=0; STATIC_DONE=0; WSP_ON=0; GPS_OK=0; FORKS_PREV=0; NET_SIG="@"
+IDLE_N=0; WAS_IDLE=0; POLLING=""
 while true; do
-  LOOP_N=$(( LOOP_N + 1 ))
-  if [ $(( LOOP_N % 8 )) -eq 1 ]; then FORCE_REFRESH=1; else FORCE_REFRESH=0; fi
-  DUMPING=1
-  dump_data
-  DUMPING=0
+  mqtt_remote_clients
+  if [ "$REMOTE_CLIENTS" -gt 0 ] || [ -n "$SERIAL_FD" ] || [ -e /tmp/always_poll ]; then
+    IDLE_N=0; _poll=1
+    if [ "$POLLING" != active ]; then POLLING=active; mqtt_publish "main/polling" "active"; fi
+  else
+    IDLE_N=$(( IDLE_N + 1 )); _poll=0
+    if [ "$IDLE_N" -ge "$IDLE_REFRESH" ]; then IDLE_N=0; _poll=1; fi
+    if [ "$POLLING" != idle ]; then POLLING=idle; mqtt_publish "main/polling" "idle"; fi
+  fi
+  if [ "$_poll" = 1 ]; then
+    LOOP_N=$(( LOOP_N + 1 ))
+    if [ $(( LOOP_N % 8 )) -eq 1 ] || [ "$WAS_IDLE" = 1 ]; then FORCE_REFRESH=1; else FORCE_REFRESH=0; fi
+    WAS_IDLE=0
+    DUMPING=1
+    dump_data
+    DUMPING=0
+  else
+    WAS_IDLE=1
+  fi
   sleep 2
 done
