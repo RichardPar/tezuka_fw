@@ -8,8 +8,9 @@ spectrum is sent to /waterfall clients, so the Maia UI, the Dashboard and the
 classifier all see the masked data. IQ samples and recordings are not touched.
 
 A line is masked only if it is within 50 ppm of a harmonic, stands 8 dB above its
-surroundings and is at most 5 bins wide. Only for the AD9361 input. Creating
-/mnt/jffs2/no-spur-mask disables it.
+surroundings and is at most 5 bins wide at half its height in dB (never measured
+more than 10 dB below the peak, so strong lines with wide skirts are still
+masked). Only for the AD9361 input. Creating /mnt/jffs2/no-spur-mask disables it.
 
 --- a/maia-httpd/src/lib.rs
 +++ b/maia-httpd/src/lib.rs
@@ -168,7 +169,7 @@ surroundings and is at most 5 bins wide. Only for the AD9361 input. Creating
  
 --- /dev/null
 +++ b/maia-httpd/src/spurmask.rs
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,208 @@
 +//! Spur mask for the spectrum sent to clients.
 +//!
 +//! The receiver of a Pluto-class board picks up harmonics of the board's own
@@ -225,7 +226,9 @@ surroundings and is at most 5 bins wide. Only for the AD9361 input. Creating
 +    if peak < reference * RATIO {
 +        return None;
 +    }
-+    let half = reference * (peak / reference).sqrt();
++    // Half the excess in dB, but never more than 10 dB below the peak: a strong
++    // line has wide skirts that would otherwise make it look like a signal.
++    let half = (reference * (peak / reference).sqrt()).max(peak * 0.1);
 +    let (mut l, mut r) = (p, p);
 +    while l > 0 && b[l - 1] >= half {
 +        l -= 1;
@@ -323,6 +326,18 @@ surroundings and is at most 5 bins wide. Only for the AD9361 input. Creating
 +        s[k + 1] = 9.0;
 +        apply(&mut s, FC, FS);
 +        assert!(s[k - 3..=k + 3].iter().all(|&v| v < 1.2), "{:?}", &s[k - 3..=k + 3]);
++    }
++
++    #[test]
++    fn masks_a_strong_spur_with_wide_skirts() {
++        // 40 dB line seen on the antenna: skirts of 29, 37, 38, 32, 18 dB above the floor
++        let mut s = floor();
++        let k = bin_of(875.0e6 * (1.0 + 20e-6));
++        for (i, db) in [(-5i32, 13.0f32), (-4, 18.0), (-3, 29.0), (-2, 37.0), (-1, 38.0), (0, 40.0), (1, 38.0), (2, 32.0), (3, 18.0), (4, 13.0)] {
++            s[(k as i32 + i) as usize] = 10f32.powf(db / 10.0);
++        }
++        apply(&mut s, FC, FS);
++        assert!(s[k - 7..=k + 7].iter().all(|&v| v < 1.2), "{:?}", &s[k - 7..=k + 7]);
 +    }
 +
 +    #[test]
