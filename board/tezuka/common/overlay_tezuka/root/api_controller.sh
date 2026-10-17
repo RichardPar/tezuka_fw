@@ -1358,22 +1358,22 @@ GPS_TICK=0
 
 # Remote MQTT clients (the Dashboard in a browser, Home Assistant, ...): established TCP connections to the broker's ports
 # (1883 plain, 9001 websocket, 9002 secure websocket) from an address that is not loopback. Local services reach the broker
-# over loopback and do not count. Sets REMOTE_CLIENTS. Pure shell builtins, no forks. PROC_NET_TCP and PROC_NET_TCP6 can be
-# overridden for testing.
+# over loopback and do not count. Sets REMOTE_CLIENTS. One awk does it: parsing /proc/net/tcp in bash costs about 58 ms per
+# call on the Zynq (66 lines, mostly TIME_WAIT), awk about 17 ms. PROC_NET_TCP and PROC_NET_TCP6 can be overridden for
+# testing; only files that exist are passed on, because BusyBox awk stops at a missing one.
 mqtt_remote_clients () {
-  local _f _sl _la _ra _st _rest
+  local _a="${PROC_NET_TCP:-/proc/net/tcp}" _b="${PROC_NET_TCP6:-/proc/net/tcp6}"
+  [ -r "$_a" ] || _a=""
+  [ -r "$_b" ] || _b=""
   REMOTE_CLIENTS=0
-  for _f in "${PROC_NET_TCP:-/proc/net/tcp}" "${PROC_NET_TCP6:-/proc/net/tcp6}"; do
-    [ -r "$_f" ] || continue
-    while read -r _sl _la _ra _st _rest; do
-      [[ $_st == 01 ]] || continue                                   # ESTABLISHED
-      case ${_la##*:} in 075B|2329|232A) ;; *) continue ;; esac     # 1883, 9001, 9002
-      case ${_ra%%:*} in
-        0100007F|00000000000000000000000001000000|0000000000000000FFFF00000100007F) ;;   # 127.0.0.1, ::1, ::ffff:127.0.0.1
-        *) REMOTE_CLIENTS=$(( REMOTE_CLIENTS + 1 )) ;;
-      esac
-    done < "$_f"
-  done
+  [ -n "$_a$_b" ] || return 0
+  REMOTE_CLIENTS=$(awk '$4 == "01" {
+      n = split($2, l, ":"); p = l[n]
+      if (p != "075B" && p != "2329" && p != "232A") next
+      split($3, r, ":"); h = r[1]
+      if (h == "0100007F" || h == "00000000000000000000000001000000" || h == "0000000000000000FFFF00000100007F") next
+      c++ } END { print c + 0 }' $_a $_b 2>/dev/null)
+  REMOTE_CLIENTS=${REMOTE_CLIENTS:-0}
 }
 
 # Poll dynamic data every 2 seconds. DUMPING / FORCE_REFRESH / LOOP_N are read by publish() and dump_data();
