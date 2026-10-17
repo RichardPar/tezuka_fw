@@ -1384,21 +1384,23 @@ mqtt_remote_clients () {
 # refresh at the next cycle (within about 2 seconds). Create /tmp/always_poll to turn this off.
 IDLE_REFRESH=30
 DUMPING=0; FORCE_REFRESH=1; LOOP_N=0; STATIC_DONE=0; WSP_ON=0; GPS_OK=0; FORKS_PREV=0; NET_SIG="@"
-IDLE_N=0; WAS_IDLE=0; POLLING=""
+IDLE_N=$(( IDLE_REFRESH - 1 )); WAS_IDLE=0; POLLING=""   # the first cycle polls even when nobody is listening
 while true; do
   mqtt_remote_clients
   if [ "$REMOTE_CLIENTS" -gt 0 ] || [ -n "$SERIAL_FD" ] || [ -e /tmp/always_poll ]; then
-    IDLE_N=0; _poll=1
+    IDLE_N=0; _poll=1; _active=1
     if [ "$POLLING" != active ]; then POLLING=active; mqtt_publish "main/polling" "active"; fi
   else
-    IDLE_N=$(( IDLE_N + 1 )); _poll=0
+    IDLE_N=$(( IDLE_N + 1 )); _poll=0; _active=0
     if [ "$IDLE_N" -ge "$IDLE_REFRESH" ]; then IDLE_N=0; _poll=1; fi
     if [ "$POLLING" != idle ]; then POLLING=idle; mqtt_publish "main/polling" "idle"; fi
   fi
   if [ "$_poll" = 1 ]; then
     LOOP_N=$(( LOOP_N + 1 ))
-    if [ $(( LOOP_N % 8 )) -eq 1 ] || [ "$WAS_IDLE" = 1 ]; then FORCE_REFRESH=1; else FORCE_REFRESH=0; fi
-    WAS_IDLE=0
+    # Full refresh every 8th poll, and at the first active poll after an idle spell (a client has just connected).
+    # The occasional idle poll only publishes what changed: the retained values are still valid.
+    if [ $(( LOOP_N % 8 )) -eq 1 ] || { [ "$_active" = 1 ] && [ "$WAS_IDLE" = 1 ]; }; then FORCE_REFRESH=1; else FORCE_REFRESH=0; fi
+    [ "$_active" = 1 ] && WAS_IDLE=0
     DUMPING=1
     dump_data
     DUMPING=0
