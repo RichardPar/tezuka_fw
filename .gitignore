@@ -10,3 +10,8 @@ u_uac2.h
 board/tezuka/common/uboot-env.config
 Dashboard/node_modules/
 Dashboard/vendor/
+
+# classifier host tests
+app/classifier/test/classifier-native
+app/classifier/test/synth/
+__pycache__/
