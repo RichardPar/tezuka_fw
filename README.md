@@ -92,29 +92,34 @@ Connect your board to a remote WireGuard server for secure remote access, config
 
 **Security note:** the pasted config is sent once and never redisplayed or echoed back over MQTT. That said, the Dashboard's default MQTT channel (port 9001) is unauthenticated on the local network by design, same as every other Dashboard control — treat the WireGuard private key like any other credential on an open network segment, and avoid exposing the device's management interface to untrusted networks.
 
-### Signal Classifier (experimental, work in progress)
+### Signal Classifier
 
-> **Status:** experimental. The pipeline is cross-compiled and exercised under `qemu-arm-static`, and the correlation math is unit-tested directly, but it has not yet been run end-to-end against a real signal on real hardware — see [Known limitations](#known-limitations) below before relying on it for anything.
+Onboard emitter detector — finds the signals in the live spectrum and names them, right on the device, no host-side processing required.
 
-Onboard PSD spectral-shape matching — identifies signal *types* (OFDM, FSK, chirp, CW, etc.) live and overlays a label on the spectrum, right on the device, no host-side processing required.
-
-**How it works:** a small daemon (`app/classifier/classifier.c`) connects as a WebSocket client to `maia-httpd`'s existing `/waterfall` feed — the same live FFT the Spectrum and Radio Astronomy pages already consume — and correlates each frame against a set of loaded templates roughly once a second, publishing the best match over MQTT. It never touches the raw-IQ path (`iio_ws_proxy`), so it adds no new consumer of the ADC and never competes with IQ Tape or the Signal Generator. This is spectral-*shape* matching (magnitude/PSD cosine similarity), not true cyclostationary SCF — it separates signal families well but won't reliably distinguish modulation order within a family (e.g. BPSK vs. QPSK), since that distinction lives in phase information this feed doesn't carry.
-
-**Sample rate:** no special sample rate is required — the daemon adapts to whatever bin count `/waterfall` is currently emitting. One real caveat: matching is relative-bin shape correlation, not Hz-normalized, so a template captured (or synthesized) at one span will transfer poorly to classifying live at a very different span. Build templates at roughly the span you plan to classify at.
+**How it works:** a small daemon (`app/classifier/classifier.c`) connects as a WebSocket client to `maia-httpd`'s existing `/waterfall` feed and, about once a second, averages the frames, reads the centre frequency and sample rate from `/api/ad9361`, and
+finds wide blocks (LTE, DVB-T, DAB, Wi-Fi) and narrow emitters (FM, GSM, carriers, bursts). It measures each in Hz (occupied bandwidth, SNR, flatness, burstiness) and names it from bandwidth, shape, burstiness, frequency band, channel raster (FM 100 kHz, GSM 200 kHz) and known
+board clock harmonics (reported as spurs, never as signals). Bursty narrow peaks in the ISM bands are clustered into one Wi-Fi activity emitter. There are no templates. It never touches the raw-IQ path (`iio_ws_proxy`), so it adds no new consumer of the ADC.
 
 **Using it:**
 
 * Open the Dashboard's **Signal Classifier** page (under RF) and toggle **Enabled** — it runs as a background service from then on.
-* A matched signal gets a label chip (e.g. "OFDM · 92%") overlaid on its own live spectrum view, plus a "Reference match" panel and a scrolling log of recent classifications. Below the confidence threshold, or with no templates loaded, it reports "unknown" rather than forcing a guess.
-* Ships with a small starter set out of the box (FM broadcast, DAB+, CW/beacon — synthesized canonical shapes, seeded on first boot) so there's something to test against immediately. Build your own with `tools/classifier_templates/` — either `capture_from_device.py` (pulls a shape straight off a live device, no GNU Radio/TorchSig required) or `synthesize_template.py` (idealized canonical shapes for classes you can't easily capture yet) — and push the result the same way a WireGuard config is sent: base64 over MQTT (`cmd/classifier/templates`), which replaces the starter set permanently.
+* The strongest identified emitter gets a label chip (e.g. "FM broadcast @ 98.299 MHz") on the live spectrum; the page's log records changes. Below the confidence threshold it reports "unknown".
+* MQTT (`state/classifier/`): `label`, `confidence`, `freq_offset`, `bandwidth_bins`, `frame_bins`, `template_id` and `feature_*` as before, plus `emitters` (JSON list of up to 16), `emitter_count`, `noise_floor_db`, `center_hz` and `sample_rate_hz`. The Dashboard does not display the list yet.
+* The templates machinery (`tools/classifier_templates/`, `cmd/classifier/templates`) is no longer used by the classifier.
+
+Details, options, tests and the reference implementation: [app/classifier/README.md](app/classifier/README.md).
 
 The same page also shows a **band plan** — a color-coded strip under the spectrum marking known allocations (broadcast, cellular, aviation, maritime, etc.), independent of whether the classifier has actually matched anything there. Click a swatch (or a row in the editable table below it) to tune to that frequency. Entries are stored on the device (`/mnt/jffs2/bandplan.json`, seeded from a starting reference table) and edited directly from the Dashboard — add, edit, or remove entries and hit **Save**.
 
 #### Known limitations
 
-* **Not yet validated on real hardware.** Everything so far is cross-compiled and run under `qemu-arm-static`, plus unit tests on the correlation math — the full `/waterfall` → correlate → MQTT → Dashboard path hasn't had a live-signal pass yet.
-* The "Reference match" panel currently shows the live captured shape only, labeled with the matched template's name — it doesn't overlay the stored template curve itself, since the raw template data lives only in the daemon's binary file and isn't published to the Dashboard.
-* PSD shape matching won't distinguish modulation order within a family (see above).
+* Validated against a Python reference on 16 recorded captures, on synthetic FM, GSM, LTE, DVB-T, DAB, LoRa-like, Wi-Fi and CW signals, and live on a Fishball 7010 (12 of 12 FM stations at 98 MHz identified). Not validated on a wide range of real signals.
+* Weak DAB ensembles are patchy, and contiguous GSM or UMTS carriers can read as an "LTE 5 MHz" block.
+* It works from the averaged power spectrum, so it cannot tell modulation order within a family (BPSK vs. QPSK).
+
+### Fishball 7010 / AD9363 boards
+
+Notes for the TZT 70 MHz-6 GHz Zynq-7010 + AD9363 board (a Fishball 7010 clone): what this branch changes, measured results, how to build and write the SD card, and the clock-spur mask in `maia-httpd`: [doc/fishball7010](doc/fishball7010/README.md).
 
 ---
 
