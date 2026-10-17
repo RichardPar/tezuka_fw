@@ -9,7 +9,7 @@
 #include "zynq-7000.dtsi"
 
 / {
-	model = "FISHBall/PlutoSky (Z7010/AD9361)";
+	model = "FISHBall/PlutoSky (Z7010/AD9363)";
 	compatible = "xlnx,zynq-7000";
 
 	aliases {

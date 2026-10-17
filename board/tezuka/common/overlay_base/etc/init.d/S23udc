@@ -38,7 +38,13 @@ create_iiod_context_attributes() {
 
 		AD936X_TYPE=$(cat /sys/bus/iio/devices/"${DEV_NAME}"/of_node/compatible | sed 's/adi,//g')
 		AD936X_TYPE_CAP=$(echo "$AD936X_TYPE" | tr '[:lower:]' '[:upper:]')
-		MODEL=$(echo "$model" | sed "s/AD936[34]/$AD936X_TYPE_CAP/")
+		case "$model" in
+			# FISHBall boards keep the part name given in the device tree: the driver is
+			# deliberately left in ad9361 mode (70 MHz-6 GHz), so the compatible string says
+			# AD9361 even on boards fitted with an AD9363.
+			FISHBall*) MODEL=$model ;;
+			*) MODEL=$(echo "$model" | sed "s/AD936[34]/$AD936X_TYPE_CAP/") ;;
+		esac
 	else
 		MODEL=$model
 	fi
