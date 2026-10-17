@@ -22,12 +22,14 @@ Kernel, Maia SDR, the Buildroot root file system and the Dashboard are stock Tez
 |---|---|
 | **Signal classifier v2**: a template-free emitter detector replaces the template matcher, which pinned one core on the Zynq-7010. See [app/classifier](../../app/classifier/README.md). | `app/classifier`, `package/classifier`, `S61classifier` |
 | **Status scripts without forks**: `api_controller.sh` publishes only changed values and reads sysfs/proc with shell builtins, `watchconsoletx.sh` and `update.sh` no longer fork every second. All state topics are kept; `state/main/forks_per_s` is new. | `board/tezuka/common/overlay_*` |
+| **Tickless idle, 250 Hz kernel tick** (Fishball 7010 only): the default periodic 1000 Hz tick woke each core 1000 times a second even when idle. Timer interrupts went from 2152 to 137-190 per second. | `board/tezuka/fishball7010/kernel/fragment/frag1.config` |
+| **Status poll only while someone listens**: `api_controller.sh` polls fully only while a remote MQTT client is connected (Dashboard, Home Assistant, ...) or `/tmp/always_poll` exists; otherwise one cheap poll a minute. New topic `state/main/polling` (`active` or `idle`). The U-Boot environment is read once per refresh instead of once per variable (seven forks and seven flash reads every 30 s before). | `board/tezuka/common/overlay_tezuka/root/api_controller.sh` |
 | **Part names from the board model**: the Dashboard no longer hard-codes Zynq-7020 / AD9361; it reads them from `state/main/hw_model`. | `Dashboard/data.jsx` (`hwParts`), `pages1-3.jsx` |
 | **AD9363 label** for this board: device tree model and `S23udc` (which rewrote the model to AD9361). The driver stays in `ad9361` mode (70 MHz-6 GHz). **Specific to boards fitted with an AD9363**: drop these two commits for AD9361 boards. | `board/tezuka/fishball7010/kernel-dts`, `.../dts`, `.../u-boot-dts`, `S23udc` |
 | **Spur mask in `maia-httpd`**: masks the LO leakage bin and harmonics of the board's 25 MHz and 100/3 MHz clocks in the spectrum sent on `/waterfall`. See [Clock spurs](#clock-spurs-and-the-lo-spike). | `package/maia-httpd/0002-spur-mask.patch` |
 | **`package-lock.json`** completed (esbuild platform packages), so `npm ci` works with npm 11. | `Dashboard/package-lock.json` |
 
-Measured on a Fishball 7010 over MQTT (CPU metric: one busy core reads 100):
+Measured on a Fishball 7010 over MQTT (CPU metric: one busy core reads 100). The tick and polling changes were measured separately with `tools/cpu_profile.sh` (below); the last version of the client check (awk) was built but its idle profile was not taken, so the saving from the polling change is expected, not measured:
 
 | | stock Tezuka v0.3.23 | this branch |
 |---|---|---|
@@ -72,6 +74,15 @@ cp -r output/fishball/images/sdimg/. /media/$USER/<card label>/ && sync
 
 Set the boot-mode switch to SD, power on and open `https://192.168.2.1` (use `http://` to see the temperature readouts). After a boot the
 network can take a few minutes to answer. If it does not boot, put the stock Tezuka release `sdimg/` on the card; that boots on this board.
+
+## Where the CPU goes
+
+`tools/cpu_profile.sh` samples `/proc` twice and prints the CPU split, forks and context switches per second, CPU by process (own time and
+the time of short-lived children), the busiest threads of the main services, the busiest interrupts and the remote MQTT clients:
+`ssh root@192.168.2.1 'WIN=60 sh -s' < tools/cpu_profile.sh`. On an idle radio (no Dashboard open, 60 second window) with the tick change
+and the polling gate: CPU 94.5% idle, 4.3 forks per second, 137 timer interrupts per second, `api_controller.sh` 3.6% of one core (it was
+7.4%); the classifier used 2.5% and `maia-httpd` 1.5%. Lessons from getting there: parsing `/proc/net/tcp` in bash costs 58 ms per call on this
+CPU (66 lines), so the client check uses one awk (17 ms); and reading seven U-Boot variables one by one read the whole flash seven times.
 
 ## Checking a build on the radio
 
