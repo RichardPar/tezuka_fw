@@ -232,7 +232,8 @@ while [ 1 ]
 do
  if [[ -r ${file} ]]
   then
-    lun=`cat $file`
+    lun=""
+    read -r lun < "$file" 2>/dev/null   # builtin: no fork (was: lun=`cat $file`)
     if [ ${#lun} -eq 0 ]
     then
 	do_reset=0
