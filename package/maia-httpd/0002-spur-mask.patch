@@ -1,0 +1,365 @@
+Mask board clock spurs and the LO bin in the spectrum sent to clients
+
+The receiver of a Pluto-class board picks up harmonics of its own clocks (25 MHz
+and 100/3 MHz measured on a Fishball 7010) and the LO leaks through at the
+centre bin, so the waterfall and spectrum show large spikes. The spectrometer
+now replaces those narrow lines with the level of their surroundings before the
+spectrum is sent to /waterfall clients, so the Maia UI, the Dashboard and the
+classifier all see the masked data. IQ samples and recordings are not touched.
+
+A line is masked only if it is within 50 ppm of a harmonic, stands 8 dB above its
+surroundings and is at most 5 bins wide. Only for the AD9361 input. Creating
+/mnt/jffs2/no-spur-mask disables it.
+
+--- a/maia-httpd/src/lib.rs
++++ b/maia-httpd/src/lib.rs
+@@ -15,4 +15,5 @@
+ pub mod rxbuffer;
+ pub mod sigmf;
+ pub mod spectrometer;
++pub mod spurmask;
+ pub mod uio;
+--- a/maia-httpd/src/spectrometer.rs
++++ b/maia-httpd/src/spectrometer.rs
+@@ -3,16 +3,22 @@
+ //! This module is used for the control of the spectrometer included in the Maia
+ //! SDR FPGA IP core.
+ 
+-use crate::{app::AppState, fpga::InterruptWaiter};
++use crate::{app::AppState, fpga::InterruptWaiter, spurmask};
+ use anyhow::Result;
+ use bytes::Bytes;
+-use maia_json::SpectrometerMode;
++use maia_json::{SpectrometerInput, SpectrometerMode};
+ use std::sync::Mutex;
++use std::time::{Duration, Instant};
+ use tokio::sync::broadcast;
+ 
+ // Used to obtain values in dB which are positive
+ const BASE_SCALE: f32 = 4e6;
+ 
++// Creating this file disables the spur mask (see the spurmask module).
++const NO_SPUR_MASK_FILE: &str = "/mnt/jffs2/no-spur-mask";
++// How long a read of the AD9361 RX LO and sampling frequencies is reused.
++const LO_CACHE: Duration = Duration::from_millis(250);
++
+ /// Spectrometer.
+ ///
+ /// This struct waits for interrupts from the spectrometer in the FPGA IP core,
+@@ -23,6 +29,8 @@
+     state: AppState,
+     sender: broadcast::Sender<Bytes>,
+     interrupt: InterruptWaiter,
++    spur_mask: bool,
++    radio_cache: Option<(Instant, f64, f64)>,
+ }
+ 
+ /// Spectrometer configuration setter.
+@@ -54,7 +62,25 @@
+             state,
+             interrupt,
+             sender,
++            spur_mask: !std::path::Path::new(NO_SPUR_MASK_FILE).exists(),
++            radio_cache: None,
++        }
++    }
++
++    /// Returns the AD9361 RX LO frequency and sampling frequency in Hz,
++    /// reading them at most every [`LO_CACHE`]. `None` if they cannot be read.
++    async fn radio_params(&mut self) -> Option<(f64, f64)> {
++        if let Some((when, lo, samp_rate)) = self.radio_cache {
++            if when.elapsed() < LO_CACHE {
++                return Some((lo, samp_rate));
++            }
+         }
++        let ad9361 = self.state.ad9361().lock().await;
++        let lo = ad9361.get_rx_lo_frequency().await.ok()? as f64;
++        let samp_rate = ad9361.get_sampling_frequency().await.ok()? as f64;
++        drop(ad9361);
++        self.radio_cache = Some((Instant::now(), lo, samp_rate));
++        Some((lo, samp_rate))
+     }
+ 
+     /// Runs the spectrometer.
+@@ -63,11 +89,22 @@
+     /// run concurrently with the rest of the application for the spectrometer
+     /// to work.
+     #[tracing::instrument(name = "spectrometer", skip_all)]
+-    pub async fn run(self) -> Result<()> {
++    pub async fn run(mut self) -> Result<()> {
+         loop {
+             self.interrupt.wait().await;
++            // Taken before the IP core mutex is locked, because it awaits.
++            let radio = if self.spur_mask { self.radio_params().await } else { None };
+             let (samp_rate, mode) = self.state.spectrometer_config().samp_rate_mode();
+             let mut ip_core = self.state.ip_core().lock().unwrap();
++            // The centre of the spectrum is the LO only when it comes straight
++            // from the AD9361 (the DDC output is shifted by the DDC frequency).
++            let spur_mask = match (radio, ip_core.spectrometer_input()) {
++                (Some((lo, ad9361_samp_rate)), SpectrometerInput::AD9361) => Some((
++                    lo,
++                    ad9361_samp_rate / ip_core.spectrometer_input_decimation() as f64,
++                )),
++                _ => None,
++            };
+             let num_integrations = ip_core.spectrometer_number_integrations() as f32;
+             let scale = match mode {
+                 SpectrometerMode::Average => BASE_SCALE / (num_integrations * samp_rate),
+@@ -85,13 +122,15 @@
+                 if self.sender.receiver_count() > 0 {
+                     // It is ok if send returns Err, because there might be
+                     // no receiver handles in this moment.
+-                    let _ = self.sender.send(Self::buffer_u64fp_to_f32(buffer, scale));
++                    let _ = self
++                        .sender
++                        .send(Self::buffer_u64fp_to_f32(buffer, scale, spur_mask));
+                 }
+             }
+         }
+     }
+ 
+-    fn buffer_u64fp_to_f32(buffer: &[u64], scale: f32) -> Bytes {
++    fn buffer_u64fp_to_f32(buffer: &[u64], scale: f32, spur_mask: Option<(f64, f64)>) -> Bytes {
+         // The spectrometer output is in "floating point" format with an
+         // exponent that occupies the 8 MSBs of the 64 value and represents
+         // powers of 4, and a mantissa that occupies the LSBs. The way to parse
+@@ -100,22 +139,26 @@
+ 
+         // TODO: optimize using Neon
+         let mut index = 0;
+-        buffer
+-        .iter()
+-        .flat_map(|&x| {
+-            let exponent = ((x >> 56) & 3) as u8;
+-            let fastlock = (x >> 61) as u8;
+-            let value = x & ((1u64 << 47) - 1);
+-            let y = value << (2 * exponent);
+-            let z = if index == 0 { 
+-                fastlock as f32
+-            } else { 
+-                y as f32 * scale 
+-            };
+-            index += 1;
+-            z.to_ne_bytes().into_iter()
+-        })
+-        .collect()
++        let mut spectrum: Vec<f32> = buffer
++            .iter()
++            .map(|&x| {
++                let exponent = ((x >> 56) & 3) as u8;
++                let fastlock = (x >> 61) as u8;
++                let value = x & ((1u64 << 47) - 1);
++                let y = value << (2 * exponent);
++                let z = if index == 0 {
++                    fastlock as f32
++                } else {
++                    y as f32 * scale
++                };
++                index += 1;
++                z
++            })
++            .collect();
++        if let Some((fc, fs)) = spur_mask {
++            spurmask::apply(&mut spectrum, fc, fs);
++        }
++        spectrum.iter().flat_map(|z| z.to_ne_bytes()).collect()
+     }
+ }
+ 
+--- /dev/null
++++ b/maia-httpd/src/spurmask.rs
+@@ -0,0 +1,194 @@
++//! Spur mask for the spectrum sent to clients.
++//!
++//! The receiver of a Pluto-class board picks up harmonics of the board's own
++//! clocks as narrow lines, and the LO leaks through at the centre bin. On a
++//! Fishball 7010 the lines measured with a terminated input were harmonics of
++//! 25 MHz (about +20 ppm off nominal) and of 100/3 MHz (about +5 ppm off).
++//! The mask replaces those bins with the level of their surroundings, so the
++//! waterfall, spectrum and anything that reads `/waterfall` no longer shows
++//! them. It only changes the displayed spectrum, not the IQ samples.
++//!
++//! A line is masked only if it is within [`PPM`] of a clock harmonic, stands at
++//! least [`RATIO_DB`] above its surroundings and is at most [`MAX_WIDTH`] bins
++//! wide at half height, so real signals (wider, or not at a harmonic) are left
++//! alone. A real narrow carrier exactly on a harmonic would be hidden too.
++
++use std::cmp::Ordering;
++
++/// Board clocks whose harmonics leak into the receiver, in Hz.
++const CLOCKS_HZ: [f64; 2] = [25e6, 100e6 / 3.0];
++/// Search window around each nominal harmonic, as a fraction of its frequency.
++const PPM: f64 = 50e-6;
++/// A line must stand at least this far above its surroundings (power ratio of 8 dB).
++const RATIO: f32 = 6.309_573;
++/// A line wider than this many bins at half height (in dB) is a signal, not a spur.
++const MAX_WIDTH: usize = 5;
++
++fn median(v: &mut [f32]) -> f32 {
++    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
++    let n = v.len();
++    if n % 2 == 1 {
++        v[n / 2]
++    } else {
++        0.5 * (v[n / 2 - 1] + v[n / 2])
++    }
++}
++
++/// Median level of the bins around `p`, skipping the six bins either side.
++fn reference(b: &[f32], p: usize) -> Option<f32> {
++    let lo = p.saturating_sub(24);
++    let hi = (p + 25).min(b.len());
++    let mut r = Vec::with_capacity(48);
++    r.extend_from_slice(&b[lo..p.saturating_sub(6).max(lo)]);
++    r.extend_from_slice(&b[(p + 7).min(hi)..hi]);
++    if r.len() < 8 { None } else { Some(median(&mut r)) }
++}
++
++/// Extent `(first, last, reference)` to replace if the peak at `p` is a spur.
++fn spur_extent(b: &[f32], p: usize) -> Option<(usize, usize, f32)> {
++    let reference = reference(b, p)?;
++    if reference <= 0.0 {
++        return None;
++    }
++    let peak = b[p];
++    if peak < reference * RATIO {
++        return None;
++    }
++    let half = reference * (peak / reference).sqrt();
++    let (mut l, mut r) = (p, p);
++    while l > 0 && b[l - 1] >= half {
++        l -= 1;
++    }
++    while r + 1 < b.len() && b[r + 1] >= half {
++        r += 1;
++    }
++    if r - l + 1 > MAX_WIDTH {
++        return None;
++    }
++    let threshold = reference * 2.5;
++    while l + 6 > p && l > 0 && b[l - 1] > threshold {
++        l -= 1;
++    }
++    while r < p + 6 && r + 1 < b.len() && b[r + 1] > threshold {
++        r += 1;
++    }
++    Some((l.saturating_sub(1), (r + 1).min(b.len() - 1), reference))
++}
++
++/// Masks the spurs in `spectrum`, a spectrum as sent on `/waterfall`: element 0
++/// is metadata and the rest are power bins centred on `fc` Hz with a span of
++/// `fs` Hz. Returns the number of bins that were replaced.
++pub fn apply(spectrum: &mut [f32], fc: f64, fs: f64) -> usize {
++    if spectrum.len() < 128 || !(fs > 0.0) {
++        return 0;
++    }
++    let hz = fs / spectrum.len() as f64;
++    let bins = &mut spectrum[1..];
++    let n = bins.len();
++    let c = n / 2;
++
++    // Candidates are located on the unmasked spectrum, then masked in turn.
++    let mut candidates: Vec<usize> = Vec::new();
++    for f0 in CLOCKS_HZ {
++        let k0 = ((fc - 0.48 * fs) / f0).ceil().max(1.0) as i64;
++        let k1 = ((fc + 0.48 * fs) / f0).floor() as i64;
++        for k in k0..=k1 {
++            let f = k as f64 * f0;
++            let idx = c as i64 + ((f - fc) / hz).round() as i64;
++            let w = ((PPM * f / hz).ceil() as i64 + 1).max(2);
++            if idx - w - 24 < 0 || idx + w + 24 >= n as i64 {
++                continue;
++            }
++            let (lo, hi) = ((idx - w) as usize, (idx + w) as usize);
++            let mut p = lo;
++            for i in lo..=hi {
++                if bins[i] > bins[p] {
++                    p = i;
++                }
++            }
++            candidates.push(p);
++        }
++    }
++
++    let mut replaced = 0;
++    // The LO leaks through at the centre bin: always smooth it over.
++    if c >= 2 {
++        if let Some(r) = reference(bins, c).filter(|&r| r > 0.0) {
++            bins[c - 2..=c + 2].fill(r);
++            replaced += 5;
++        }
++    }
++    for p in candidates {
++        if let Some((l, r, reference)) = spur_extent(bins, p) {
++            bins[l..=r].fill(reference);
++            replaced += r - l + 1;
++        }
++    }
++    replaced
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const FS: f64 = 20.72e6;
++    const FC: f64 = 870e6;
++
++    /// Flat noise-like floor with a little deterministic ripple.
++    fn floor() -> Vec<f32> {
++        (0..4096).map(|i| 1.0 + 0.05 * ((i * 7 % 13) as f32 / 13.0 - 0.5)).collect()
++    }
++
++    fn bin_of(f: f64) -> usize {
++        1 + 2047 + ((f - FC) / (FS / 4096.0)).round() as usize
++    }
++
++    #[test]
++    fn masks_a_harmonic_spur() {
++        let mut s = floor();
++        let k = bin_of(875.0e6 * (1.0 + 20e-6));
++        s[k - 1] = 8.0;
++        s[k] = 60.0;
++        s[k + 1] = 9.0;
++        apply(&mut s, FC, FS);
++        assert!(s[k - 3..=k + 3].iter().all(|&v| v < 1.2), "{:?}", &s[k - 3..=k + 3]);
++    }
++
++    #[test]
++    fn leaves_a_wide_signal_on_a_harmonic() {
++        let mut s = floor();
++        let k = bin_of(866.667e6);
++        for i in k - 20..k + 20 {
++            s[i] = 12.0;
++        }
++        let before = s.clone();
++        apply(&mut s, FC, FS);
++        assert_eq!(&s[k - 20..k + 20], &before[k - 20..k + 20]);
++    }
++
++    #[test]
++    fn leaves_a_narrow_line_away_from_the_harmonics() {
++        let mut s = floor();
++        let k = bin_of(871.9e6);
++        s[k] = 60.0;
++        apply(&mut s, FC, FS);
++        assert_eq!(s[k], 60.0);
++    }
++
++    #[test]
++    fn smooths_the_lo_bin_and_keeps_the_metadata() {
++        let mut s = floor();
++        s[0] = 3.0;
++        s[2048] = 40.0;
++        apply(&mut s, FC, FS);
++        assert_eq!(s[0], 3.0);
++        assert!(s[2048] < 1.2);
++    }
++
++    #[test]
++    fn ignores_a_degenerate_spectrum() {
++        let mut s = vec![0.0f32; 4096];
++        assert_eq!(apply(&mut s, FC, FS), 0);
++        assert_eq!(apply(&mut [1.0; 8], FC, FS), 0);
++    }
++}
